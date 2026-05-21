@@ -1045,8 +1045,7 @@ void sendCloudStatus(void) {
 #if GROWATT_CLOUD_SUPPORTED == 1
   if (!Config.cloud_serial.isEmpty()) {
     doc["enabled"] = true;
-    const char* stateNames[] = {"Disconnected","Connecting","Connected","Announced","Active","Error"};
-    doc["state"] = stateNames[growattCloud.getState()];
+    doc["state"] = growattCloud.getStateName();
     doc["stateCode"] = (int)growattCloud.getState();
     doc["packetsSent"] = growattCloud.getPacketsSent();
     doc["packetsRecv"] = growattCloud.getPacketsRecv();
@@ -1237,20 +1236,87 @@ void loop() {
           handleWdtReset(mqttSuccess);
 
 #if GROWATT_CLOUD_SUPPORTED == 1
+          // Read inverter serial via Modbus and set on cloud module (once)
+          {
+            static bool invSerialSet = false;
+            if (!invSerialSet && !Config.cloud_serial.isEmpty()) {
+              char invSN[11] = {0};
+              bool ok = true;
+              for (int r = 0; r < 5 && ok; r++) {
+                uint16_t rv;
+                if (Inverter.ReadHoldingReg(23 + r, &rv)) {
+                  invSN[r*2] = (rv >> 8) & 0xFF;
+                  invSN[r*2+1] = rv & 0xFF;
+                } else ok = false;
+              }
+              if (ok && invSN[0] > 0x20) {
+                invSN[10] = '\0';
+                growattCloud.setInverterSerial(invSN);
+                invSerialSet = true;
+                Log.print(F("[GrowattCloud] Inverter serial: "));
+                Log.println(invSN);
+              }
+            }
+          }
           // Feed register data to Growatt Cloud sender
           if (!Config.cloud_serial.isEmpty()) {
-            // Build arrays of raw register values for cloud protocol
+            // Build arrays indexed by MODBUS ADDRESS (not array index!)
+            // The cloud protocol places values at their Modbus register address
+            // positions in the packet, so we must use address-indexed arrays.
             uint16_t numInput = Inverter._Protocol.InputRegisterCount;
-            uint16_t numHolding = Inverter._Protocol.HoldingRegisterCount;
-            uint16_t inputRegs[125];
-            uint16_t holdingRegs[35];
+
+            // Input registers indexed by Modbus address (0-89 for cloud protocol)
+            static uint16_t inputRegsByAddr[GROWATT_MAX_INPUT_REGS];
+            memset(inputRegsByAddr, 0, sizeof(inputRegsByAddr));
+            uint16_t maxInputAddr = 0;
             for (uint16_t i = 0; i < numInput && i < 125; i++) {
-              inputRegs[i] = (uint16_t)Inverter._Protocol.InputRegisters[i].value;
+              uint16_t addr = Inverter._Protocol.InputRegisters[i].address;
+              if (addr < GROWATT_MAX_INPUT_REGS) {
+                uint32_t rawVal = Inverter._Protocol.InputRegisters[i].value;
+                inputRegsByAddr[addr] = (uint16_t)(rawVal & 0xFFFF);
+                // For 32-bit registers, the high word goes at addr, low at addr+1
+                if (Inverter._Protocol.InputRegisters[i].size == SIZE_32BIT ||
+                    Inverter._Protocol.InputRegisters[i].size == SIZE_32BIT_S) {
+                  inputRegsByAddr[addr] = (uint16_t)((rawVal >> 16) & 0xFFFF);
+                  if (addr + 1 < GROWATT_MAX_INPUT_REGS) {
+                    inputRegsByAddr[addr + 1] = (uint16_t)(rawVal & 0xFFFF);
+                  }
+                }
+                if (addr > maxInputAddr) maxInputAddr = addr;
+              }
             }
-            for (uint16_t i = 0; i < numHolding && i < 35; i++) {
-              holdingRegs[i] = (uint16_t)Inverter._Protocol.HoldingRegisters[i].value;
+
+            // Holding registers: read raw values via Modbus for ANNOUNCE packet.
+            // Stock firmware sends 90 holding regs with device identity data.
+            // Growatt305 defines HoldingRegisterCount=0, so we read directly.
+            static uint16_t holdingRegsByAddr[GROWATT_MAX_HOLDING_REGS];
+            static bool holdingRegsRead = false;
+            if (!holdingRegsRead) {
+              memset(holdingRegsByAddr, 0, sizeof(holdingRegsByAddr));
+              Log.println(F("[GrowattCloud] Reading raw holding registers 0-89 via Modbus..."));
+              bool anySuccess = false;
+              // Read holding registers in chunks (Modbus limit ~45 per read)
+              for (uint16_t addr = 0; addr < 90; addr++) {
+                uint16_t val;
+                if (Inverter.ReadHoldingReg(addr, &val)) {
+                  holdingRegsByAddr[addr] = val;
+                  anySuccess = true;
+                }
+              }
+              if (anySuccess) {
+                holdingRegsRead = true;
+                Log.println(F("[GrowattCloud] Holding registers read OK"));
+                // Log a few key values for debugging
+                Log.printf("[GrowattCloud] hreg[0]=%04X hreg[7]=%04X hreg[23]=%04X hreg[75]=%04X\n",
+                           holdingRegsByAddr[0], holdingRegsByAddr[7],
+                           holdingRegsByAddr[23], holdingRegsByAddr[75]);
+              } else {
+                Log.println(F("[GrowattCloud] Holding register read failed (inverter offline?)"));
+              }
             }
-            growattCloud.loop(inputRegs, numInput, holdingRegs, numHolding);
+
+            growattCloud.loop(inputRegsByAddr, maxInputAddr + 2,
+                              holdingRegsByAddr, holdingRegsRead ? GROWATT_MAX_HOLDING_REGS : 0);
           }
 #endif
 

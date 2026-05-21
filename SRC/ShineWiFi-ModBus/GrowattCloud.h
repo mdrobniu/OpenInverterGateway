@@ -10,7 +10,7 @@
  * and community documentation (Grott, nwf, sciurius).
  *
  * Author: OpenInverterGateway contributors
- * Date: 2026-05-19
+ * Date: 2026-05-15
  * License: MIT
  */
 
@@ -36,28 +36,35 @@
 #define GROWATT_FUNC_PING         0x16   // Keepalive heartbeat
 #define GROWATT_FUNC_CONFIGURE    0x18   // Server pushes config
 #define GROWATT_FUNC_IDENTIFY     0x19   // Server queries config
-#define GROWATT_FUNC_SMARTMETER   0x20   // Smart meter data
+#define GROWATT_FUNC_REBOOT       0x20   // Server reboot command
+#define GROWATT_FUNC_BUFFERED     0x50   // Buffered data report
+#define GROWATT_FUNC_5D           0x5D   // Unknown/firmware update
 
 // Identify config items (for responding to server queries)
-#define GROWATT_CFG_INTERVAL      0x04   // Log interval (minutes)
+#define GROWATT_CFG_INTERVAL      0x04   // Log interval / protocol version
 #define GROWATT_CFG_ADDR_MIN      0x05   // Modbus address range min
 #define GROWATT_CFG_ADDR_MAX      0x06   // Modbus address range max
+#define GROWATT_CFG_SERVER_PORT_U16 0x07 // Server port (uint16)
 #define GROWATT_CFG_DATALOGGER_ID 0x08   // Datalogger serial
+#define GROWATT_CFG_INVERTER_ID   0x09   // Inverter serial
 #define GROWATT_CFG_LOCAL_IP      0x0E   // Local IP address
-#define GROWATT_CFG_LOCAL_PORT    0x0F   // Local port
+#define GROWATT_CFG_NETMASK       0x0F   // Netmask
 #define GROWATT_CFG_MAC           0x10   // MAC address
-#define GROWATT_CFG_SERVER_LEN    0x11   // Server hostname length
-#define GROWATT_CFG_SERVER_PORT   0x12   // Server port
-#define GROWATT_CFG_SERVER_ADDR   0x13   // Server address (ENFORCED!)
+#define GROWATT_CFG_SERVER_ADDR   0x11   // Server address
+#define GROWATT_CFG_SERVER_PORT   0x12   // Server port (string)
+#define GROWATT_CFG_SERVER_ADDR2  0x13   // Server address (alt, ENFORCED!)
 #define GROWATT_CFG_FW_VERSION    0x15   // Firmware version string
+#define GROWATT_CFG_TIME          0x1F   // Current time
+#define GROWATT_CFG_WIFI_SSID     0x30   // WiFi SSID
 
 // Timing (milliseconds)
-#define GROWATT_PING_INTERVAL     180000  // 3 minutes
+#define GROWATT_PING_INTERVAL     30000   // 30 seconds (matches stock firmware)
 #define GROWATT_DATA_INTERVAL     300000  // 5 minutes (configurable)
 #define GROWATT_ANNOUNCE_RETRY    30000   // 30 seconds until ACKed
 #define GROWATT_CONNECT_TIMEOUT   10000   // TCP connect timeout
 #define GROWATT_READ_TIMEOUT      5000    // TCP read timeout
 #define GROWATT_MAX_UNACKED       15      // Drop connection after N unacked
+#define GROWATT_IDENTIFY_WAIT     8000    // Wait for IDENTIFY after PING (ms)
 
 // Buffer sizes
 #define GROWATT_SERIAL_LEN        30      // Serial field width (NUL-padded)
@@ -69,6 +76,10 @@
 static const uint8_t GROWATT_XOR_MASK[] = { 0x47, 0x72, 0x6F, 0x77, 0x61, 0x74, 0x74 };
 #define GROWATT_XOR_MASK_LEN      7
 
+// Maximum number of raw Modbus registers for DATA/ANNOUNCE packets
+#define GROWATT_MAX_INPUT_REGS    90
+#define GROWATT_MAX_HOLDING_REGS  90
+
 // --- Structures ---
 
 struct GrowattCloudConfig {
@@ -78,7 +89,7 @@ struct GrowattCloudConfig {
     char     inverterSerial[GROWATT_SERIAL_LEN + 1];   // Read from inverter via Modbus
     char     fwVersion[16];
     uint8_t  logIntervalMin;      // Data report interval in minutes
-    uint16_t protocolId;          // 0x0005 for encrypted v1
+    uint16_t protocolId;          // 0x0006 for encrypted v2
     bool     enabled;             // Enable/disable cloud sending
 };
 
@@ -86,7 +97,8 @@ struct GrowattCloudConfig {
 enum GrowattCloudState {
     GCS_DISCONNECTED,
     GCS_CONNECTING,
-    GCS_CONNECTED,
+    GCS_CONNECTED,       // TCP up, initial PING sent
+    GCS_PING_WAIT,       // Waiting for IDENTIFY queries after PING
     GCS_ANNOUNCED,       // ANNOUNCE sent, waiting for ACK
     GCS_ACTIVE,          // ACK received, sending periodic DATA
     GCS_ERROR
@@ -106,10 +118,10 @@ public:
      * Call in loop(). Handles connection, ping, announce, data sending.
      * Pass current inverter register data for periodic reports.
      *
-     * @param inputRegs   Array of input register values (FC04, from inverter)
-     * @param numInputRegs Number of input registers
-     * @param holdingRegs  Array of holding register values (FC03, from inverter)
-     * @param numHoldingRegs Number of holding registers
+     * @param inputRegs    Array of raw input register values indexed by MODBUS ADDRESS
+     * @param numInputRegs Number of input registers (highest address + 1)
+     * @param holdingRegs  Array of raw holding register values indexed by MODBUS ADDRESS
+     * @param numHoldingRegs Number of holding registers (highest address + 1)
      */
     void loop(const uint16_t* inputRegs, uint16_t numInputRegs,
               const uint16_t* holdingRegs = nullptr, uint16_t numHoldingRegs = 0);
@@ -125,6 +137,11 @@ public:
     GrowattCloudState getState() const { return _state; }
 
     /**
+     * Get state name for debugging.
+     */
+    const char* getStateName() const;
+
+    /**
      * Force reconnection.
      */
     void reconnect();
@@ -133,6 +150,11 @@ public:
      * Update inverter serial (discovered via Modbus after boot).
      */
     void setInverterSerial(const char* serial);
+
+    /**
+     * Check if inverter serial has been set.
+     */
+    bool hasInverterSerial() const { return strlen(_config.inverterSerial) > 0; }
 
     /**
      * Get stats for web UI / debugging.
@@ -152,6 +174,7 @@ private:
     uint16_t _buildPing(uint8_t* buf);
     uint16_t _buildAnnounce(uint8_t* buf, const uint16_t* holdingRegs, uint16_t numHoldingRegs);
     uint16_t _buildData(uint8_t* buf, const uint16_t* inputRegs, uint16_t numInputRegs);
+    uint16_t _buildGenericAck(uint8_t* buf, uint8_t funcCode);
 
     // --- Protocol message handlers ---
     void _handleReceived();
@@ -169,8 +192,11 @@ private:
     void _writeTimestamp(uint8_t* buf);
 
     // --- Send/receive helpers ---
-    bool _sendPacket(uint8_t* buf, uint16_t len);
+    bool _sendPacket(uint8_t* buf, uint16_t len, const char* label);
     int  _readPacket(uint8_t* buf, uint16_t maxLen);
+
+    // --- Logging helper ---
+    void _logHex(const char* prefix, const uint8_t* data, uint16_t len, uint16_t maxBytes = 32);
 
     // --- State ---
     WiFiClient         _client;
@@ -181,6 +207,7 @@ private:
     uint32_t           _lastDataSend;
     uint32_t           _lastAnnounce;
     uint32_t           _lastConnectAttempt;
+    uint32_t           _pingWaitStart;    // When PING_WAIT state entered
     uint8_t            _unackedCount;
     bool               _announceAcked;
 
