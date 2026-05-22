@@ -550,6 +550,10 @@ void setup() {
 
   Inverter.InitProtocol();
   InverterReconnect();
+  // Collect Origin and Referer so checkSameOrigin() can inspect them.
+  const char* csrfHeaders[] = {"Origin", "Referer"};
+  httpServer.collectHeaders(csrfHeaders,
+                            sizeof(csrfHeaders) / sizeof(csrfHeaders[0]));
   httpServer.begin();
 
 #if GROWATT_CLOUD_SUPPORTED == 1
@@ -581,13 +585,17 @@ void setup() {
   }
 
   if (!Config.cloud_serial.isEmpty()) {
-    GrowattCloudConfig cloudCfg;
+    GrowattCloudConfig cloudCfg = {};
     strncpy(cloudCfg.serverHost, Config.cloud_server.c_str(), sizeof(cloudCfg.serverHost) - 1);
+    cloudCfg.serverHost[sizeof(cloudCfg.serverHost) - 1] = '\0';
     cloudCfg.serverPort = GROWATT_PORT_DEFAULT;
     cloudCfg.protocolId = GROWATT_PROTO_ENC_V2;
-    strncpy(cloudCfg.dataloggerSerial, Config.cloud_serial.c_str(), GROWATT_SERIAL_LEN);
-    memset(cloudCfg.inverterSerial, 0, sizeof(cloudCfg.inverterSerial));
+    strncpy(cloudCfg.dataloggerSerial, Config.cloud_serial.c_str(),
+            sizeof(cloudCfg.dataloggerSerial) - 1);
+    cloudCfg.dataloggerSerial[sizeof(cloudCfg.dataloggerSerial) - 1] = '\0';
+    // inverterSerial already zeroed by the {} initializer above
     strncpy(cloudCfg.fwVersion, "1.7.7.7", sizeof(cloudCfg.fwVersion) - 1);
+    cloudCfg.fwVersion[sizeof(cloudCfg.fwVersion) - 1] = '\0';
     cloudCfg.logIntervalMin = 5;
     cloudCfg.enabled = true;
     growattCloud.begin(cloudCfg);
@@ -712,6 +720,31 @@ bool checkAuth() {
   }
 #endif
   return true;
+}
+
+// CSRF mitigation for state-changing endpoints. Browsers send Basic Auth
+// credentials automatically, so a cross-site POST could otherwise reconfigure
+// the device. Require that the Origin (or Referer) header points at this
+// device. Same-origin form posts from the device's own pages always include
+// one of these; cross-site posts will not (or will point elsewhere).
+bool checkSameOrigin() {
+  String host = httpServer.hostHeader();
+  String origin = httpServer.header(F("Origin"));
+  String referer = httpServer.header(F("Referer"));
+  auto matches = [&host](const String& url) -> bool {
+    if (url.isEmpty() || host.isEmpty()) return false;
+    int schemeEnd = url.indexOf(F("://"));
+    if (schemeEnd < 0) return false;
+    int hostStart = schemeEnd + 3;
+    int hostEnd = url.indexOf('/', hostStart);
+    String urlHost = (hostEnd < 0) ? url.substring(hostStart)
+                                   : url.substring(hostStart, hostEnd);
+    return urlHost.equalsIgnoreCase(host);
+  };
+  if (!origin.isEmpty()) return matches(origin);
+  if (!referer.isEmpty()) return matches(referer);
+  // Neither header present: reject state-changing request to be safe.
+  return false;
 }
 
 void sendJson(JsonDocument& doc) {
@@ -999,6 +1032,11 @@ void sendConfigJson(void) {
 
 void handleSaveConfig(void) {
   if (!checkAuth()) return;
+  if (!checkSameOrigin()) {
+    httpServer.send(403, F("text/plain"),
+                    F("Forbidden: cross-origin request rejected"));
+    return;
+  }
   if (httpServer.hasArg(F("hostname"))) Config.hostname = httpServer.arg(F("hostname"));
   if (httpServer.hasArg(F("static_ip"))) Config.static_ip = httpServer.arg(F("static_ip"));
   if (httpServer.hasArg(F("static_netmask"))) Config.static_netmask = httpServer.arg(F("static_netmask"));
@@ -1045,9 +1083,15 @@ void sendCloudStatus(void) {
 #if GROWATT_CLOUD_SUPPORTED == 1
   if (!Config.cloud_serial.isEmpty()) {
     doc["enabled"] = true;
-    const char* stateNames[] = {"Disconnected","Connecting","Connected","Announced","Active","Error"};
-    doc["state"] = stateNames[growattCloud.getState()];
-    doc["stateCode"] = (int)growattCloud.getState();
+    static const char* const stateNames[] = {"Disconnected", "Connecting",
+                                             "Connected",    "Announced",
+                                             "Active",       "Error"};
+    int sIdx = (int)growattCloud.getState();
+    doc["state"] =
+        (sIdx >= 0 && sIdx < (int)(sizeof(stateNames) / sizeof(stateNames[0])))
+            ? stateNames[sIdx]
+            : "Unknown";
+    doc["stateCode"] = sIdx;
     doc["packetsSent"] = growattCloud.getPacketsSent();
     doc["packetsRecv"] = growattCloud.getPacketsRecv();
     doc["reconnects"] = growattCloud.getReconnects();
@@ -1239,15 +1283,19 @@ void loop() {
 #if GROWATT_CLOUD_SUPPORTED == 1
           // Feed register data to Growatt Cloud sender
           if (!Config.cloud_serial.isEmpty()) {
-            // Build arrays of raw register values for cloud protocol
-            uint16_t numInput = Inverter._Protocol.InputRegisterCount;
-            uint16_t numHolding = Inverter._Protocol.HoldingRegisterCount;
+            // Build arrays of raw register values for cloud protocol.
+            // Cap counts to the local buffer sizes so the downstream callee
+            // never reads past inputRegs[]/holdingRegs[].
             uint16_t inputRegs[125];
             uint16_t holdingRegs[35];
-            for (uint16_t i = 0; i < numInput && i < 125; i++) {
+            uint16_t numInput = Inverter._Protocol.InputRegisterCount;
+            uint16_t numHolding = Inverter._Protocol.HoldingRegisterCount;
+            if (numInput > 125) numInput = 125;
+            if (numHolding > 35) numHolding = 35;
+            for (uint16_t i = 0; i < numInput; i++) {
               inputRegs[i] = (uint16_t)Inverter._Protocol.InputRegisters[i].value;
             }
-            for (uint16_t i = 0; i < numHolding && i < 35; i++) {
+            for (uint16_t i = 0; i < numHolding; i++) {
               holdingRegs[i] = (uint16_t)Inverter._Protocol.HoldingRegisters[i].value;
             }
             growattCloud.loop(inputRegs, numInput, holdingRegs, numHolding);

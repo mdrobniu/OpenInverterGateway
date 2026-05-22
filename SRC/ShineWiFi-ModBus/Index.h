@@ -8,7 +8,7 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Growatt Inverter</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"
-  onerror="document.body.classList.add('no-cdn')">
+  onerror="document.documentElement.classList.add('no-cdn')">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.2.1/chart.umd.min.js"
   integrity="sha512-GCiwmzA0bNGVsp1otzTJ4LWQT2jjGJENLGyLlerlzckNI30moi2EQT0AfRI7fLYYYDKR+7hnuh35r3y1uJzugw=="
   crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -312,7 +312,6 @@ function fetchCloud(){
 }
 
 /* Start/stop cloud polling based on tab visibility */
-var origTabClick = null;
 document.querySelectorAll('.tabs button').forEach(function(btn){
   btn.addEventListener('click', function(){
     if(btn.getAttribute('data-tab')==='cloud'){
