@@ -97,12 +97,19 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
       break;
 
     case GCS_CONNECTED:
-      // Send ANNOUNCE, wait for ACK
+      // Socket can drop after connect() succeeds but before ANNOUNCE is ACKed.
+      // Without this guard the state stays GCS_CONNECTED and the ANNOUNCE below
+      // is rebuilt + resent every loop iteration -> log flood.
+      if (!_checkConnection()) {
+        _disconnect();
+        break;
+      }
+      // Send ANNOUNCE, wait for ACK. Advance _lastAnnounce even on a failed send
+      // so a half-open socket can't hold the retry gate wide open.
       if (now - _lastAnnounce >= GROWATT_ANNOUNCE_RETRY || _lastAnnounce == 0) {
         uint16_t len = _buildAnnounce(_txBuf, holdingRegs, numHoldingRegs);
-        if (_sendPacket(_txBuf, len)) {
-          _lastAnnounce = now;
-        }
+        _sendPacket(_txBuf, len);
+        _lastAnnounce = now;
       }
       // Check for server response
       _handleReceived();
