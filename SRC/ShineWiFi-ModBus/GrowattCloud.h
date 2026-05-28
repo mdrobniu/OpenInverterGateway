@@ -54,10 +54,10 @@
 // Timing (milliseconds)
 #define GROWATT_PING_INTERVAL 180000   // 3 minutes
 #define GROWATT_DATA_INTERVAL 300000   // 5 minutes (configurable)
-#define GROWATT_ANNOUNCE_RETRY 30000   // 30 seconds until ACKed
+#define GROWATT_ANNOUNCE_RETRY 120000  // 2 minutes until ACKed (cloud batches ACKs)
 #define GROWATT_CONNECT_TIMEOUT 10000  // TCP connect timeout
 #define GROWATT_READ_TIMEOUT 5000      // TCP read timeout
-#define GROWATT_MAX_UNACKED 15         // Drop connection after N unacked
+#define GROWATT_MAX_UNACKED 50         // Drop connection after N unacked
 
 // Buffer sizes
 #define GROWATT_SERIAL_LEN 30    // Serial field width (NUL-padded)
