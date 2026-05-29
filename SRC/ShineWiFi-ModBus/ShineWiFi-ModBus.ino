@@ -1138,18 +1138,38 @@ void handleSetParam(void) {
     ok = wroteMode && wrotePf;
     snprintf(msg, sizeof(msg), "HR 99 = 1, HR 5 = %u (PF=%.2f) : %s",
              scaled, pf, ok ? "OK" : "Modbus write failed");
-  } else if (type == "pv_grid_voltage_high" || type == "pv_grid_voltage_low") {
-    // Holding regs 23-27 are the inverter serial (ASCII), NOT voltage limits.
-    // The cloud's real `pv_grid_voltage_high/low` register addresses haven't
-    // been captured yet (we intentionally skipped exercising them since
-    // wrong values can take the inverter offline). Refuse for safety until
-    // a real cloud-side WRITE_REG is observed and recorded here.
-    httpServer.send(503, F("text/plain"),
-        F("Voltage limit registers not verified yet. Trigger this command "
-          "from the Shine cloud portal once so the firmware can capture the "
-          "real register address (visible as a [GrowattCloud] WRITE_REG line "
-          "in syslog), then update handleSetParam to use it."));
-    return;
+  } else if (type == "pv_grid_voltage_low") {
+    // Both Vac limit registers on this 3-phase inverter store LINE-TO-LINE
+    // volts × 10, not L-N. The inverter measures pvgridvoltage/2/3 as L-L
+    // (~420 V each phase pair on nominal 400 V grid).
+    // EN50438 -15%: 195.5 V L-N × √3 ≈ 338 V L-L.
+    // The Shine portal's "Set Grid Voltage Low" prompt sends the user input
+    // unchanged — entering 195 there gives 1950 raw which is effectively
+    // "trip never" (L-L would have to fall to half-nominal). Always enter L-L.
+    if (v1.length() == 0) { httpServer.send(400, F("text/plain"), F("voltage required")); return; }
+    float vf = v1.toFloat();
+    if (vf < 280.0f || vf > 400.0f) {
+      httpServer.send(400, F("text/plain"),
+                      F("low limit must be 280..400 V (line-to-line)"));
+      return;
+    }
+    ok = write1(19, (uint16_t)(vf * 10.0f), msg, sizeof(msg));
+  } else if (type == "pv_grid_voltage_high") {
+    // HR 20 stores Vac HIGH limit in LINE-TO-LINE volts × 10 (the inverter is
+    // 3-phase, nominal L-L = 400 V = 230 V × √3). The Shine cloud's
+    // "Set Grid Voltage High" passes its input through unchanged, so the
+    // user must enter the L-L value (e.g. 440 V = EN50438 +10%, not 253 V L-N).
+    // Verified scaling 2026-05-29: read HR 20 = 4382 ≈ 438 V L-L = factory
+    // setting roughly matching EN50438. Writing a value below ~400 V L-L is
+    // rejected at the Modbus layer.
+    if (v1.length() == 0) { httpServer.send(400, F("text/plain"), F("voltage required")); return; }
+    float vf = v1.toFloat();
+    if (vf < 380.0f || vf > 500.0f) {
+      httpServer.send(400, F("text/plain"),
+                      F("high limit must be 380..500 V (line-to-line)"));
+      return;
+    }
+    ok = write1(20, (uint16_t)(vf * 10.0f), msg, sizeof(msg));
   } else if (type == "pf_sys_year") {
     time_t now = time(nullptr);
     struct tm* lt = localtime(&now);

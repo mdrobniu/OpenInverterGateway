@@ -155,14 +155,14 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
         <td><button onclick="setParam('pv_power_factor',document.getElementById('set_pf').value)">Apply</button></td>
       </tr>
       <tr>
-        <td>Grid Voltage High Limit (V) <small>(⚠ unverified register)</small></td>
-        <td><input id="set_vhi" type="number" step="0.1" value=""></td>
-        <td><button onclick="setParamDangerous('pv_grid_voltage_high',document.getElementById('set_vhi').value,'Grid Voltage HIGH limit')">Apply</button></td>
+        <td>Grid Voltage HIGH Limit (V L-L) <small>(HR 20, EN50438 default: 440.0 = 400×1.10)</small></td>
+        <td><input id="set_vhi" type="number" step="0.1" min="380" max="500" value="440.0"></td>
+        <td><button onclick="setParamDangerous('pv_grid_voltage_high',document.getElementById('set_vhi').value,'Grid Voltage HIGH limit (line-to-line)')">Apply</button></td>
       </tr>
       <tr>
-        <td>Grid Voltage Low Limit (V) <small>(⚠ unverified register)</small></td>
-        <td><input id="set_vlo" type="number" step="0.1" value=""></td>
-        <td><button onclick="setParamDangerous('pv_grid_voltage_low',document.getElementById('set_vlo').value,'Grid Voltage LOW limit')">Apply</button></td>
+        <td>Grid Voltage LOW Limit (V L-L) <small>(HR 19, EN50438 default: 338.0 = 195.5×√3)</small></td>
+        <td><input id="set_vlo" type="number" step="0.1" min="280" max="400" value="338.0"></td>
+        <td><button onclick="setParamDangerous('pv_grid_voltage_low',document.getElementById('set_vlo').value,'Grid Voltage LOW limit (line-to-line)')">Apply</button></td>
       </tr>
       <tr>
         <td>Set Time <small>(HR 45-50)</small></td>
@@ -356,11 +356,12 @@ function setParam(type, val1, val2){
 function setParamDangerous(type, val1, label){
   if(!val1){ alert('Enter a value first'); return; }
   var prompt1 = 'CAUTION: ' + label + ' = ' + val1 + ' V\n\n' +
-    'Wrong values can trip the inverter offline or damage the grid connection.\n' +
-    'Also: this register address is NOT verified — the firmware will refuse\n' +
-    'the write unless explicitly enabled in the backend.\n\nProceed?';
+    'Changes the inverter\'s grid protection trip point. Wrong values can\n' +
+    'take the inverter offline or violate your grid operator\'s rules.\n\n' +
+    'EN50438 defaults: LOW 338 V (L-L), HIGH 440 V (L-L).\n\n' +
+    'Proceed?';
   if(!confirm(prompt1)) return;
-  if(!confirm('Are you ABSOLUTELY sure? Type Yes again to confirm.')) return;
+  if(!confirm('Confirm once more to apply.')) return;
   setParam(type, val1);
 }
 
