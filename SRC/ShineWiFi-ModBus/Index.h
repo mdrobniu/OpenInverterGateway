@@ -155,14 +155,14 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
         <td><button onclick="setParam('pv_power_factor',document.getElementById('set_pf').value)">Apply</button></td>
       </tr>
       <tr>
-        <td>Grid Voltage High Limit (V) <small>(HR 23)</small></td>
+        <td>Grid Voltage High Limit (V) <small>(⚠ unverified register)</small></td>
         <td><input id="set_vhi" type="number" step="0.1" value=""></td>
-        <td><button onclick="setParam('pv_grid_voltage_high',document.getElementById('set_vhi').value)">Apply</button></td>
+        <td><button onclick="setParamDangerous('pv_grid_voltage_high',document.getElementById('set_vhi').value,'Grid Voltage HIGH limit')">Apply</button></td>
       </tr>
       <tr>
-        <td>Grid Voltage Low Limit (V) <small>(HR 24)</small></td>
+        <td>Grid Voltage Low Limit (V) <small>(⚠ unverified register)</small></td>
         <td><input id="set_vlo" type="number" step="0.1" value=""></td>
-        <td><button onclick="setParam('pv_grid_voltage_low',document.getElementById('set_vlo').value)">Apply</button></td>
+        <td><button onclick="setParamDangerous('pv_grid_voltage_low',document.getElementById('set_vlo').value,'Grid Voltage LOW limit')">Apply</button></td>
       </tr>
       <tr>
         <td>Set Time <small>(HR 45-50)</small></td>
@@ -352,6 +352,16 @@ function setParam(type, val1, val2){
     .then(function(r){return r.text();})
     .then(function(t){ msg.textContent = t; })
     .catch(function(e){ msg.textContent = 'Request failed: ' + e; });
+}
+function setParamDangerous(type, val1, label){
+  if(!val1){ alert('Enter a value first'); return; }
+  var prompt1 = 'CAUTION: ' + label + ' = ' + val1 + ' V\n\n' +
+    'Wrong values can trip the inverter offline or damage the grid connection.\n' +
+    'Also: this register address is NOT verified — the firmware will refuse\n' +
+    'the write unless explicitly enabled in the backend.\n\nProceed?';
+  if(!confirm(prompt1)) return;
+  if(!confirm('Are you ABSOLUTELY sure? Type Yes again to confirm.')) return;
+  setParam(type, val1);
 }
 
 /* ---- Cloud tab polling ---- */

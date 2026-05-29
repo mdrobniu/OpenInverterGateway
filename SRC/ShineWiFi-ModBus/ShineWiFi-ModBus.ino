@@ -1138,14 +1138,18 @@ void handleSetParam(void) {
     ok = wroteMode && wrotePf;
     snprintf(msg, sizeof(msg), "HR 99 = 1, HR 5 = %u (PF=%.2f) : %s",
              scaled, pf, ok ? "OK" : "Modbus write failed");
-  } else if (type == "pv_grid_voltage_high") {
-    if (v1.length() == 0) { httpServer.send(400, F("text/plain"), F("voltage required")); return; }
-    uint16_t raw = (uint16_t)(v1.toFloat() * 10.0f);  // /10 multiplier per Growatt convention
-    ok = write1(23, raw, msg, sizeof(msg));
-  } else if (type == "pv_grid_voltage_low") {
-    if (v1.length() == 0) { httpServer.send(400, F("text/plain"), F("voltage required")); return; }
-    uint16_t raw = (uint16_t)(v1.toFloat() * 10.0f);
-    ok = write1(24, raw, msg, sizeof(msg));
+  } else if (type == "pv_grid_voltage_high" || type == "pv_grid_voltage_low") {
+    // Holding regs 23-27 are the inverter serial (ASCII), NOT voltage limits.
+    // The cloud's real `pv_grid_voltage_high/low` register addresses haven't
+    // been captured yet (we intentionally skipped exercising them since
+    // wrong values can take the inverter offline). Refuse for safety until
+    // a real cloud-side WRITE_REG is observed and recorded here.
+    httpServer.send(503, F("text/plain"),
+        F("Voltage limit registers not verified yet. Trigger this command "
+          "from the Shine cloud portal once so the firmware can capture the "
+          "real register address (visible as a [GrowattCloud] WRITE_REG line "
+          "in syslog), then update handleSetParam to use it."));
+    return;
   } else if (type == "pf_sys_year") {
     time_t now = time(nullptr);
     struct tm* lt = localtime(&now);
