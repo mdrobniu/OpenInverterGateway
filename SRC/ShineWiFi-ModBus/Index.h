@@ -52,6 +52,7 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
   <button class="active" data-tab="dash">Dashboard</button>
   <button data-tab="cfg">Config</button>
   <button data-tab="cloud">Cloud</button>
+  <button data-tab="ctrl">Set</button>
   <button data-tab="dbg">Debug Log</button>
   <button data-tab="sys">System</button>
 </nav>
@@ -116,6 +117,61 @@ const char MAIN_page[] PROGMEM = R"rawliteral(
       <tr><th>Last Send</th><td id="cl_last">--</td></tr>
     </tbody>
   </table>
+</section>
+
+<!-- ===== Set / Control Tab ===== -->
+<section id="tab-ctrl" class="tab-content">
+  <p><small>Direct Modbus writes — same parameters as the Shine portal Set commands, but
+  applied immediately over RS-485 without going through Growatt's cloud.</small></p>
+  <table role="grid">
+    <thead><tr><th>Parameter</th><th>Value</th><th></th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Inverter On/Off <small>(HR 0)</small></td>
+        <td><select id="set_onoff"><option value="1">On</option><option value="0">Off</option></select></td>
+        <td><button onclick="setParam('pv_on_off',document.getElementById('set_onoff').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>PF Memory <small>(HR 2)</small></td>
+        <td><select id="set_pfmem"><option value="1">On</option><option value="0">Off</option></select></td>
+        <td><button onclick="setParam('pv_pf_cmd_memory_state',document.getElementById('set_pfmem').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>Active Power Rate (%) <small>(HR 3)</small></td>
+        <td><input id="set_actrate" type="number" min="0" max="100" value="100"></td>
+        <td><button onclick="setParam('pv_active_p_rate',document.getElementById('set_actrate').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>Reactive Power Rate (%) <small>(HR 4)</small></td>
+        <td>
+          <select id="set_reactdir"><option value="over">Inductive</option><option value="under">Capacitive</option></select>
+          <input id="set_reactrate" type="number" min="0" max="100" value="0" style="width:80px">
+        </td>
+        <td><button onclick="setParam('pv_reactive_p_rate',document.getElementById('set_reactrate').value,document.getElementById('set_reactdir').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>Power Factor <small>(HR 5, -1..-0.8 / 0.8..1)</small></td>
+        <td><input id="set_pf" type="number" step="0.01" min="-1" max="1" value="1.0"></td>
+        <td><button onclick="setParam('pv_power_factor',document.getElementById('set_pf').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>Grid Voltage High Limit (V) <small>(HR 23)</small></td>
+        <td><input id="set_vhi" type="number" step="0.1" value=""></td>
+        <td><button onclick="setParam('pv_grid_voltage_high',document.getElementById('set_vhi').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>Grid Voltage Low Limit (V) <small>(HR 24)</small></td>
+        <td><input id="set_vlo" type="number" step="0.1" value=""></td>
+        <td><button onclick="setParam('pv_grid_voltage_low',document.getElementById('set_vlo').value)">Apply</button></td>
+      </tr>
+      <tr>
+        <td>Set Time <small>(HR 45-50)</small></td>
+        <td></td>
+        <td><button onclick="setParam('pf_sys_year','now')">Sync to now</button></td>
+      </tr>
+    </tbody>
+  </table>
+  <p id="set_result"></p>
 </section>
 
 <!-- ===== Debug Log Tab ===== -->
@@ -283,6 +339,19 @@ function showCfgMsg(text, isErr){
   var el = document.getElementById('cfgMsg');
   el.className = 'cfg-msg ' + (isErr ? 'err' : 'ok');
   el.textContent = text;
+}
+
+/* ---- Set / Control tab ---- */
+function setParam(type, val1, val2){
+  var msg = document.getElementById('set_result');
+  msg.textContent = 'Working...';
+  var body = 'type=' + encodeURIComponent(type) +
+             '&val1=' + encodeURIComponent(val1 || '') +
+             '&val2=' + encodeURIComponent(val2 || '');
+  fetch('./setParam', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body})
+    .then(function(r){return r.text();})
+    .then(function(t){ msg.textContent = t; })
+    .catch(function(e){ msg.textContent = 'Request failed: ' + e; });
 }
 
 /* ---- Cloud tab polling ---- */

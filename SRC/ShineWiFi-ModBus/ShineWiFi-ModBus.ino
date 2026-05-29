@@ -542,6 +542,7 @@ void setup() {
 #endif
   httpServer.on("/config", HTTP_GET, sendConfigJson);
   httpServer.on("/saveConfig", HTTP_POST, handleSaveConfig);
+  httpServer.on("/setParam", HTTP_POST, handleSetParam);
   httpServer.on("/cloudStatus", sendCloudStatus);
   httpServer.on("/systemStatus", sendSystemStatus);
   httpServer.on("/update", HTTP_GET, sendUpdatePage);
@@ -1075,6 +1076,100 @@ void handleSaveConfig(void) {
     delay(1000);
     ESP.restart();
   }
+}
+
+// Local Set Inverter Param — mirrors the Shine portal Set commands, but
+// applies the writes directly via Modbus instead of routing through Growatt
+// cloud. Each paramId maps to one or two holding-register writes that the
+// reverse-engineered cloud protocol uses for the same action.
+void handleSetParam(void) {
+  if (!checkAuth()) return;
+  if (!httpServer.hasArg(F("type"))) {
+    httpServer.send(400, F("text/plain"), F("missing type"));
+    return;
+  }
+  String type = httpServer.arg(F("type"));
+  String v1 = httpServer.hasArg(F("val1")) ? httpServer.arg(F("val1")) : String();
+  String v2 = httpServer.hasArg(F("val2")) ? httpServer.arg(F("val2")) : String();
+
+  auto write1 = [](uint16_t reg, uint16_t val, char* out, size_t outlen) -> bool {
+    bool ok = Inverter.WriteHoldingReg(reg, val);
+    snprintf(out, outlen, "HR %u = %u : %s", (unsigned)reg, (unsigned)val,
+             ok ? "OK" : "Modbus write failed");
+    return ok;
+  };
+
+  char msg[128];
+  bool ok = false;
+
+  if (type == "pv_on_off") {
+    ok = write1(0, (uint16_t)v1.toInt() ? 1 : 0, msg, sizeof(msg));
+  } else if (type == "pv_pf_cmd_memory_state") {
+    ok = write1(2, (uint16_t)v1.toInt() ? 1 : 0, msg, sizeof(msg));
+  } else if (type == "pv_active_p_rate") {
+    int pct = v1.toInt();
+    if (pct < 0 || pct > 100) {
+      httpServer.send(400, F("text/plain"), F("rate must be 0..100"));
+      return;
+    }
+    ok = write1(3, (uint16_t)pct, msg, sizeof(msg));
+  } else if (type == "pv_reactive_p_rate") {
+    int pct = v1.toInt();
+    if (pct < 0 || pct > 100) {
+      httpServer.send(400, F("text/plain"), F("rate must be 0..100"));
+      return;
+    }
+    bool wroteRate = Inverter.WriteHoldingReg(4, (uint16_t)pct);
+    // dir: cloud uses reg 99 = 4 for Inductive ("over"), 5 for Capacitive ("under")
+    uint16_t dirVal = (v2 == "under") ? 5 : 4;
+    bool wroteDir = Inverter.WriteHoldingReg(99, dirVal);
+    ok = wroteRate && wroteDir;
+    snprintf(msg, sizeof(msg), "HR 4 = %d, HR 99 = %u : %s", pct, dirVal,
+             ok ? "OK" : "Modbus write failed");
+  } else if (type == "pv_power_factor") {
+    float pf = v1.toFloat();
+    if (pf < -1.0f || pf > 1.0f || (pf > -0.8f && pf < 0.8f)) {
+      httpServer.send(400, F("text/plain"), F("PF must be -1..-0.8 or 0.8..1"));
+      return;
+    }
+    bool wroteMode = Inverter.WriteHoldingReg(99, 1);
+    uint16_t scaled = (uint16_t)(pf * 20000.0f);
+    bool wrotePf = Inverter.WriteHoldingReg(5, scaled);
+    ok = wroteMode && wrotePf;
+    snprintf(msg, sizeof(msg), "HR 99 = 1, HR 5 = %u (PF=%.2f) : %s",
+             scaled, pf, ok ? "OK" : "Modbus write failed");
+  } else if (type == "pv_grid_voltage_high") {
+    if (v1.length() == 0) { httpServer.send(400, F("text/plain"), F("voltage required")); return; }
+    uint16_t raw = (uint16_t)(v1.toFloat() * 10.0f);  // /10 multiplier per Growatt convention
+    ok = write1(23, raw, msg, sizeof(msg));
+  } else if (type == "pv_grid_voltage_low") {
+    if (v1.length() == 0) { httpServer.send(400, F("text/plain"), F("voltage required")); return; }
+    uint16_t raw = (uint16_t)(v1.toFloat() * 10.0f);
+    ok = write1(24, raw, msg, sizeof(msg));
+  } else if (type == "pf_sys_year") {
+    time_t now = time(nullptr);
+    struct tm* lt = localtime(&now);
+    if (!lt || lt->tm_year < 120) {  // sanity: 2020 or later
+      httpServer.send(503, F("text/plain"), F("system time not synced"));
+      return;
+    }
+    bool a = Inverter.WriteHoldingReg(45, (uint16_t)(lt->tm_year - 100));  // year-2000
+    bool b = Inverter.WriteHoldingReg(46, (uint16_t)(lt->tm_mon + 1));
+    bool c = Inverter.WriteHoldingReg(47, (uint16_t)lt->tm_mday);
+    bool d = Inverter.WriteHoldingReg(48, (uint16_t)lt->tm_hour);
+    bool e = Inverter.WriteHoldingReg(49, (uint16_t)lt->tm_min);
+    bool f = Inverter.WriteHoldingReg(50, (uint16_t)lt->tm_sec);
+    ok = a && b && c && d && e && f;
+    snprintf(msg, sizeof(msg), "HR 45-50 = %04d-%02d-%02d %02d:%02d:%02d : %s",
+             lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday,
+             lt->tm_hour, lt->tm_min, lt->tm_sec, ok ? "OK" : "partial fail");
+  } else {
+    httpServer.send(400, F("text/plain"), F("unknown type"));
+    return;
+  }
+
+  Log.printf("[setParam] %s -> %s\n", type.c_str(), msg);
+  httpServer.send(ok ? 200 : 500, F("text/plain"), msg);
 }
 
 void sendCloudStatus(void) {
