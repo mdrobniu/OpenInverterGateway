@@ -18,7 +18,12 @@
  */
 
 #include "GrowattCloud.h"
+#include "Growatt.h"
+#include <TLog.h>
 #include <time.h>
+
+// Set commands from the cloud go through the global Inverter instance.
+extern Growatt Inverter;
 
 #ifdef ESP8266
 #include <ESP8266WiFi.h>
@@ -60,7 +65,7 @@ void GrowattCloud::begin(const GrowattCloudConfig& config) {
     strncpy(_config.fwVersion, "1.7.7.7", sizeof(_config.fwVersion) - 1);
   }
   _state = GCS_DISCONNECTED;
-  Serial.printf(
+  Log.printf(
       "[GrowattCloud] Initialized: server=%s:%d serial=%s proto=0x%04X\n",
       _config.serverHost, _config.serverPort, _config.dataloggerSerial,
       _config.protocolId);
@@ -86,7 +91,7 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
         _state = GCS_CONNECTED;
         _announceAcked = false;
         _unackedCount = 0;
-        Serial.println("[GrowattCloud] TCP connected");
+        Log.println("[GrowattCloud] TCP connected");
         // Send initial PING immediately
         uint16_t len = _buildPing(_txBuf);
         _sendPacket(_txBuf, len);
@@ -121,7 +126,7 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
       }
       if (_announceAcked) {
         _state = GCS_ACTIVE;
-        Serial.println("[GrowattCloud] ANNOUNCE ACKed, entering ACTIVE state");
+        Log.println("[GrowattCloud] ANNOUNCE ACKed, entering ACTIVE state");
       }
       break;
 
@@ -152,7 +157,7 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
       }
       // Check for too many unacked messages
       if (_unackedCount >= GROWATT_MAX_UNACKED) {
-        Serial.println("[GrowattCloud] Too many unacked, reconnecting");
+        Log.println("[GrowattCloud] Too many unacked, reconnecting");
         _disconnect();
       }
       break;
@@ -172,7 +177,7 @@ void GrowattCloud::setInverterSerial(const char* serial) {
 
 void GrowattCloud::_connect() {
   _lastConnectAttempt = millis();
-  Serial.printf("[GrowattCloud] Connecting to %s:%d...\n", _config.serverHost,
+  Log.printf("[GrowattCloud] Connecting to %s:%d...\n", _config.serverHost,
                 _config.serverPort);
 
   if (_client.connect(_config.serverHost, _config.serverPort)) {
@@ -187,7 +192,7 @@ void GrowattCloud::_connect() {
     _lastPing = millis();
   } else {
     _state = GCS_ERROR;
-    Serial.println("[GrowattCloud] Connection failed");
+    Log.println("[GrowattCloud] Connection failed");
   }
 }
 
@@ -406,10 +411,20 @@ void GrowattCloud::_handleReceived() {
 
   _packetsRecv++;
 
+  uint16_t rxTrans = (_rxBuf[0] << 8) | _rxBuf[1];
+  uint16_t protoId = (_rxBuf[2] << 8) | _rxBuf[3];
   uint8_t funcCode = _rxBuf[7];
+  const char* rxName =
+      (funcCode == GROWATT_FUNC_PING)      ? "PING_ACK"
+      : (funcCode == GROWATT_FUNC_ANNOUNCE) ? "ANNOUNCE_ACK"
+      : (funcCode == GROWATT_FUNC_DATA)     ? "DATA_ACK"
+      : (funcCode == GROWATT_FUNC_IDENTIFY) ? "IDENTIFY"
+      : (funcCode == GROWATT_FUNC_CONFIGURE) ? "CONFIGURE"
+                                             : "UNK";
+  Log.printf("[GrowattCloud] RX %s(0x%02X) trans=%u proto=0x%04X len=%d\n",
+             rxName, funcCode, (unsigned)rxTrans, (unsigned)protoId, len);
 
   // Decrypt payload if encrypted protocol
-  uint16_t protoId = (_rxBuf[2] << 8) | _rxBuf[3];
   if (protoId == GROWATT_PROTO_ENC_V1 || protoId == GROWATT_PROTO_ENC_V2) {
     _xorDecrypt(_rxBuf, GROWATT_HEADER_LEN, len - GROWATT_HEADER_LEN);
   }
@@ -439,10 +454,27 @@ void GrowattCloud::_handleReceived() {
       _handleConfigure(_rxBuf, len);
       break;
 
-    default:
-      Serial.printf("[GrowattCloud] Unknown func 0x%02X, len=%d\n", funcCode,
-                    len);
+    case GROWATT_FUNC_WRITE_REG:
+      // Server is pushing a Modbus FC06 single-holding-register write
+      _handleWriteReg(_rxBuf, len);
       break;
+
+    default: {
+      // Hex-dump the post-header payload so we can decode unknown commands
+      // (notably func 0x06 used by tcpSet.do for inverter Set actions).
+      char hex[3 * 48 + 1];
+      hex[0] = '\0';
+      uint16_t dump = (len > GROWATT_HEADER_LEN) ? len - GROWATT_HEADER_LEN : 0;
+      if (dump > 48) dump = 48;
+      for (uint16_t i = 0; i < dump; i++) {
+        char b[4];
+        snprintf(b, sizeof(b), "%02X ", _rxBuf[GROWATT_HEADER_LEN + i]);
+        strncat(hex, b, sizeof(hex) - strlen(hex) - 1);
+      }
+      Log.printf("[GrowattCloud] UNK func=0x%02X len=%d payload=%s\n",
+                 funcCode, len, hex);
+      break;
+    }
   }
 }
 
@@ -451,9 +483,9 @@ void GrowattCloud::_handleAck(uint8_t funcCode) {
 
   if (funcCode == GROWATT_FUNC_ANNOUNCE) {
     _announceAcked = true;
-    Serial.println("[GrowattCloud] ANNOUNCE ACK received");
+    Log.println("[GrowattCloud] ANNOUNCE ACK received");
   } else if (funcCode == GROWATT_FUNC_DATA) {
-    Serial.println("[GrowattCloud] DATA ACK received");
+    Log.println("[GrowattCloud] DATA ACK received");
   }
 }
 
@@ -471,7 +503,7 @@ void GrowattCloud::_handleIdentify(const uint8_t* data, uint16_t len) {
   uint16_t payloadStart = GROWATT_HEADER_LEN + GROWATT_SERIAL_LEN;
   uint16_t configItem = (data[payloadStart] << 8) | data[payloadStart + 1];
 
-  Serial.printf("[GrowattCloud] IDENTIFY query: config item 0x%04X\n",
+  Log.printf("[GrowattCloud] IDENTIFY query: config item 0x%04X\n",
                 configItem);
 
   // Build response
@@ -613,10 +645,24 @@ void GrowattCloud::_handleConfigure(const uint8_t* data, uint16_t len) {
 
   uint16_t payloadStart = GROWATT_HEADER_LEN + GROWATT_SERIAL_LEN;
   uint16_t configItem = (data[payloadStart] << 8) | data[payloadStart + 1];
+  uint16_t valLen = (data[payloadStart + 2] << 8) | data[payloadStart + 3];
 
-  Serial.printf(
-      "[GrowattCloud] CONFIGURE push: item 0x%04X (ACKing, ignoring)\n",
-      configItem);
+  // Dump the full configure payload as hex so we can map item codes to actions.
+  // Format: "[GrowattCloud] CFG item=0x.... len=.. value=AB CD EF ..."
+  // Capped at 32 bytes to keep the syslog line readable.
+  char hex[3 * 32 + 1];
+  hex[0] = '\0';
+  uint16_t dump = valLen;
+  if (dump > 32) dump = 32;
+  uint16_t valStart = payloadStart + 4;
+  for (uint16_t i = 0; i < dump && valStart + i < len; i++) {
+    char b[4];
+    snprintf(b, sizeof(b), "%02X ", data[valStart + i]);
+    strncat(hex, b, sizeof(hex) - strlen(hex) - 1);
+  }
+  Log.printf(
+      "[GrowattCloud] CFG item=0x%04X len=%u value=%s(ACKing, not applied)\n",
+      (unsigned)configItem, (unsigned)valLen, hex);
 
   // Build ACK response: [header][serial][config_item][0x00 0x01][0x00]
   uint16_t pos = GROWATT_HEADER_LEN;
@@ -631,6 +677,59 @@ void GrowattCloud::_handleConfigure(const uint8_t* data, uint16_t len) {
   uint16_t dataLen = pos - GROWATT_HEADER_LEN;
   _writeHeader(_txBuf, _transactionId++, _config.protocolId, dataLen + 2, 0x01,
                GROWATT_FUNC_CONFIGURE);
+
+  if (_config.protocolId == GROWATT_PROTO_ENC_V1 ||
+      _config.protocolId == GROWATT_PROTO_ENC_V2) {
+    _xorEncrypt(_txBuf, GROWATT_HEADER_LEN, dataLen);
+  }
+
+  uint16_t crc = _calcCRC16(_txBuf, GROWATT_HEADER_LEN + dataLen);
+  _txBuf[pos++] = (crc >> 8) & 0xFF;
+  _txBuf[pos++] = crc & 0xFF;
+
+  _sendPacket(_txBuf, pos);
+}
+
+/**
+ * Handle WRITE_REG (0x06) from server — Modbus FC06 "write single holding
+ * register". Used by Shine portal Set commands (Set Time, Set Inverter On/Off,
+ * Set Grid Voltage High/Low, Active/Reactive power rate, etc.). The cloud
+ * sends ONE packet per register; Set Time is a sequence of 6 writes
+ * (reg 45..50 = Y, M, D, H, Min, Sec). Server waits for our echo before
+ * sending the next; missing ACKs make Shine show "inv_set_failure".
+ *
+ * Packet (decrypted, len=44 total):
+ *   header(8) + datalogger_serial(30) + reg_addr(2) + reg_value(2) + crc(2)
+ *
+ * Response (echo of request, Modbus FC06 convention):
+ *   header(8) + datalogger_serial(30) + reg_addr(2) + reg_value(2) + crc(2)
+ */
+void GrowattCloud::_handleWriteReg(const uint8_t* data, uint16_t len) {
+  if (len < GROWATT_HEADER_LEN + GROWATT_SERIAL_LEN + 4) return;
+
+  uint16_t payloadStart = GROWATT_HEADER_LEN + GROWATT_SERIAL_LEN;
+  uint16_t reg = (data[payloadStart] << 8) | data[payloadStart + 1];
+  uint16_t value = (data[payloadStart + 2] << 8) | data[payloadStart + 3];
+
+  Log.printf("[GrowattCloud] WRITE_REG reg=%u (0x%04X) value=%u (0x%04X)\n",
+             (unsigned)reg, (unsigned)reg, (unsigned)value, (unsigned)value);
+
+  bool wrote = Inverter.WriteHoldingReg(reg, value);
+  Log.printf("[GrowattCloud] Modbus FC06 write reg=%u value=%u -> %s\n",
+             (unsigned)reg, (unsigned)value, wrote ? "OK" : "FAILED");
+
+  // Build echo response (Modbus FC06 standard: response = request body)
+  uint16_t pos = GROWATT_HEADER_LEN;
+  _writeSerial(_txBuf + pos, _config.dataloggerSerial);
+  pos += GROWATT_SERIAL_LEN;
+  _txBuf[pos++] = (reg >> 8) & 0xFF;
+  _txBuf[pos++] = reg & 0xFF;
+  _txBuf[pos++] = (value >> 8) & 0xFF;
+  _txBuf[pos++] = value & 0xFF;
+
+  uint16_t dataLen = pos - GROWATT_HEADER_LEN;
+  _writeHeader(_txBuf, _transactionId++, _config.protocolId, dataLen + 2, 0x01,
+               GROWATT_FUNC_WRITE_REG);
 
   if (_config.protocolId == GROWATT_PROTO_ENC_V1 ||
       _config.protocolId == GROWATT_PROTO_ENC_V2) {
@@ -721,13 +820,27 @@ void GrowattCloud::_writeTimestamp(uint8_t* buf) {
 bool GrowattCloud::_sendPacket(uint8_t* buf, uint16_t len) {
   if (!_client.connected()) return false;
 
+  uint16_t trans = (buf[0] << 8) | buf[1];
+  uint8_t func = buf[7];
+  uint16_t crc = (len >= 2) ? ((buf[len - 2] << 8) | buf[len - 1]) : 0;
+  const char* fname =
+      (func == GROWATT_FUNC_PING)     ? "PING"
+      : (func == GROWATT_FUNC_ANNOUNCE) ? "ANNOUNCE"
+      : (func == GROWATT_FUNC_DATA)     ? "DATA"
+      : (func == GROWATT_FUNC_IDENTIFY) ? "IDENTIFY_RESP"
+                                        : "?";
+
   size_t written = _client.write(buf, len);
   if (written == len) {
     _packetsSent++;
     _unackedCount++;
+    Log.printf(
+        "[GrowattCloud] TX %s: %u bytes, trans=%u, func=0x%02X, CRC=0x%04X\n",
+        fname, (unsigned)len, (unsigned)trans, func, (unsigned)crc);
     return true;
   }
-  Serial.printf("[GrowattCloud] Send failed: wrote %d/%d\n", written, len);
+  Log.printf("[GrowattCloud] Send failed (%s): wrote %d/%d\n", fname, written,
+             len);
   return false;
 }
 

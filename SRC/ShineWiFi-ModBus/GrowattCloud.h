@@ -31,6 +31,7 @@
 #define GROWATT_PROTO_ENC_V2 0x0006  // Growatt encrypted v2 (XOR)
 
 // Function codes (byte 7 of header)
+#define GROWATT_FUNC_WRITE_REG 0x06   // Write single holding register (Modbus FC06)
 #define GROWATT_FUNC_ANNOUNCE 0x03    // DATA3: device announcement
 #define GROWATT_FUNC_DATA 0x04        // DATA4: periodic telemetry
 #define GROWATT_FUNC_PING 0x16        // Keepalive heartbeat
@@ -163,6 +164,7 @@ class GrowattCloud {
   void _handleAck(uint8_t funcCode);
   void _handleIdentify(const uint8_t* data, uint16_t len);
   void _handleConfigure(const uint8_t* data, uint16_t len);
+  void _handleWriteReg(const uint8_t* data, uint16_t len);
 
   // --- Header and encryption ---
   void _writeHeader(uint8_t* buf, uint16_t transId, uint16_t protoId,
