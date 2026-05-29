@@ -1281,24 +1281,68 @@ void loop() {
           handleWdtReset(mqttSuccess);
 
 #if GROWATT_CLOUD_SUPPORTED == 1
-          // Feed register data to Growatt Cloud sender
+          // Inverter serial lives in HR 23-27 as packed ASCII; set it on the
+          // cloud module once so ANNOUNCE carries the real device identifier.
+          // Without this the cloud accepts the datalogger but can't link the
+          // device to the user's account → app shows no data.
+          static bool inverterSerialSet = false;
+          if (!inverterSerialSet && !Config.cloud_serial.isEmpty()) {
+            char invSerial[11] = {0};
+            bool gotSerial = true;
+            for (int r = 0; r < 5; r++) {
+              uint16_t regVal;
+              if (Inverter.ReadHoldingReg(23 + r, &regVal)) {
+                invSerial[r * 2]     = (regVal >> 8) & 0xFF;
+                invSerial[r * 2 + 1] = regVal & 0xFF;
+              } else {
+                gotSerial = false;
+                break;
+              }
+            }
+            if (gotSerial && invSerial[0] > 0x20) {
+              invSerial[10] = '\0';
+              growattCloud.setInverterSerial(invSerial);
+              inverterSerialSet = true;
+              Log.print(F("[GrowattCloud] Inverter serial: "));
+              Log.println(invSerial);
+            }
+          }
+
+          // Feed register data to Growatt Cloud sender.
+          // The cloud DATA frame indexes registers by Modbus *address*, but
+          // Inverter._Protocol.InputRegisters[i] is indexed by an arbitrary
+          // table position (e.g. v3.05 reads only 12 sparse addresses).
+          // Placing values at the wrong array slot makes the cloud parse
+          // every field at the wrong byte offset → server discards the payload
+          // silently (status=-1, pac=0). Build address-indexed arrays here.
           if (!Config.cloud_serial.isEmpty()) {
-            // Build arrays of raw register values for cloud protocol.
-            // Cap counts to the local buffer sizes so the downstream callee
-            // never reads past inputRegs[]/holdingRegs[].
-            uint16_t inputRegs[125];
-            uint16_t holdingRegs[35];
+            uint16_t inputRegs[90] = {0};
+            uint16_t holdingRegs[90] = {0};
             uint16_t numInput = Inverter._Protocol.InputRegisterCount;
             uint16_t numHolding = Inverter._Protocol.HoldingRegisterCount;
-            if (numInput > 125) numInput = 125;
-            if (numHolding > 35) numHolding = 35;
             for (uint16_t i = 0; i < numInput; i++) {
-              inputRegs[i] = (uint16_t)Inverter._Protocol.InputRegisters[i].value;
+              const sGrowattModbusReg_t& r = Inverter._Protocol.InputRegisters[i];
+              if (r.address >= 90) continue;
+              if (r.size == SIZE_32BIT || r.size == SIZE_32BIT_S) {
+                inputRegs[r.address] = (uint16_t)(r.value >> 16);
+                if (r.address + 1 < 90)
+                  inputRegs[r.address + 1] = (uint16_t)(r.value & 0xFFFF);
+              } else {
+                inputRegs[r.address] = (uint16_t)r.value;
+              }
             }
             for (uint16_t i = 0; i < numHolding; i++) {
-              holdingRegs[i] = (uint16_t)Inverter._Protocol.HoldingRegisters[i].value;
+              const sGrowattModbusReg_t& r = Inverter._Protocol.HoldingRegisters[i];
+              if (r.address >= 90) continue;
+              if (r.size == SIZE_32BIT || r.size == SIZE_32BIT_S) {
+                holdingRegs[r.address] = (uint16_t)(r.value >> 16);
+                if (r.address + 1 < 90)
+                  holdingRegs[r.address + 1] = (uint16_t)(r.value & 0xFFFF);
+              } else {
+                holdingRegs[r.address] = (uint16_t)r.value;
+              }
             }
-            growattCloud.loop(inputRegs, numInput, holdingRegs, numHolding);
+            growattCloud.loop(inputRegs, 90, holdingRegs, 90);
           }
 #endif
 
