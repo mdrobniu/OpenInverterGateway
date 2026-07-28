@@ -46,6 +46,9 @@ GrowattCloud::GrowattCloud()
     , _packetsSent(0)
     , _packetsRecv(0)
     , _reconnects(0)
+    , _lastRecvTime(0)
+    , _connectTime(0)
+    , _silentSessions(0)
 {
 }
 
@@ -97,8 +100,14 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
             if (strlen(_config.inverterSerial) == 0) {
                 return; // Wait for inverter serial discovery
             }
-            if (now - _lastConnectAttempt >= GROWATT_CONNECT_TIMEOUT) {
-                _connect();
+            {
+                // Back off harder after sessions where the server never spoke:
+                // Growatt tends to blank fresh connections made too soon.
+                uint8_t shift = (_silentSessions > 4) ? 4 : _silentSessions;
+                uint32_t delay = GROWATT_RECONNECT_DELAY << shift;
+                if (now - _lastConnectAttempt >= delay) {
+                    _connect();
+                }
             }
             break;
 
@@ -142,6 +151,14 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
             break;
 
         case GCS_CONNECTED: {
+            // Server accepted TCP but has never sent a byte: dead session
+            // (seen after abrupt reconnects) - cycle it with backoff.
+            if (_lastRecvTime == 0 && now - _connectTime >= GROWATT_SILENT_TIMEOUT) {
+                Log.println("[GrowattCloud] No server response since connect, cycling session");
+                _silentSessions++;
+                _disconnect();
+                break;
+            }
             // Send ANNOUNCE, wait for ACK
             if (now - _lastAnnounce >= GROWATT_ANNOUNCE_RETRY || _lastAnnounce == 0) {
                 uint16_t alen = _buildAnnounce(_txBuf, holdingRegs, numHoldingRegs);
@@ -174,6 +191,21 @@ void GrowattCloud::loop(const uint16_t* inputRegs, uint16_t numInputRegs,
             }
             // Handle incoming messages (IDENTIFY, CONFIGURE, ACKs)
             _handleReceived();
+            // _handleReceived may have just stamped _lastRecvTime later than
+            // our loop-entry 'now'; refresh it or the unsigned diff underflows.
+            now = millis();
+            // Server stopped talking mid-session (pings go unACKed): cycle.
+            if (_lastRecvTime != 0 && now - _lastRecvTime >= GROWATT_RX_TIMEOUT) {
+                Log.println("[GrowattCloud] No RX for 5 minutes in ACTIVE, cycling session");
+                _disconnect();
+                break;
+            }
+            if (_lastRecvTime == 0 && now - _connectTime >= GROWATT_SILENT_TIMEOUT) {
+                Log.println("[GrowattCloud] No server response since connect, cycling session");
+                _silentSessions++;
+                _disconnect();
+                break;
+            }
             // Periodic PING
             if (now - _lastPing >= GROWATT_PING_INTERVAL) {
                 uint16_t plen = _buildPing(_txBuf);
@@ -225,6 +257,8 @@ void GrowattCloud::_connect() {
         _announceAcked = false;
         _unackedCount = 0;
         _lastAnnounce = 0;
+        _connectTime = millis();
+        _lastRecvTime = 0;
         _reconnects++;
         Log.printf("[GrowattCloud] TCP connected (reconnect #%d)\n", _reconnects);
 
@@ -445,12 +479,13 @@ uint16_t GrowattCloud::_buildData(uint8_t* buf,
     // Log key register values for debugging
     {
         uint16_t status = (numInputRegs > 0) ? inputRegs[0] : 0;
-        // DcPower at addr 1-2 (32-bit), AcPower at addr 16-17 (32-bit)
+        // Legacy record slots: Ppv at 1-2, total Pac at 11-12 (both 32-bit)
         uint32_t dcPower = 0, acPower = 0;
         if (numInputRegs > 2) dcPower = ((uint32_t)inputRegs[1] << 16) | inputRegs[2];
-        if (numInputRegs > 17) acPower = ((uint32_t)inputRegs[16] << 16) | inputRegs[17];
-        Log.printf("[GrowattCloud] DATA: status=%d dcPower=%u(%.1fW) acPower=%u(%.1fW) numRegs=%d\n",
-                   status, dcPower, dcPower / 10.0, acPower, acPower / 10.0, numInputRegs);
+        if (numInputRegs > 12) acPower = ((uint32_t)inputRegs[11] << 16) | inputRegs[12];
+        Log.printf("[GrowattCloud] DATA: status=%d dcPower=%u(%.1fW) acPower=%u(%.1fW) ts=%02d-%02d-%02d %02d:%02d:%02d numRegs=%d\n",
+                   status, dcPower, dcPower / 10.0, acPower, acPower / 10.0,
+                   p[60], p[61], p[62], p[63], p[64], p[65], numInputRegs);
     }
 
     // Header: data_len = 257 (payload 255 + unit_id 1 + func_code 1)
@@ -519,6 +554,12 @@ void GrowattCloud::_handleReceived() {
 
         _packetsRecv++;
         messagesProcessed++;
+        // Any valid packet from the server proves the link is alive: clear the
+        // unacked backlog (we also send packets the server never ACKs, e.g.
+        // IDENTIFY responses) and reset the silent-session escalation.
+        _unackedCount = 0;
+        _lastRecvTime = millis();
+        _silentSessions = 0;
 
         uint16_t transId = (_rxBuf[0] << 8) | _rxBuf[1];
         uint16_t protoId = (_rxBuf[2] << 8) | _rxBuf[3];

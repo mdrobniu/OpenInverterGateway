@@ -65,6 +65,9 @@
 #define GROWATT_READ_TIMEOUT      5000    // TCP read timeout
 #define GROWATT_MAX_UNACKED       15      // Drop connection after N unacked
 #define GROWATT_IDENTIFY_WAIT     8000    // Wait for IDENTIFY after PING (ms)
+#define GROWATT_SILENT_TIMEOUT    90000   // No RX at all since connect -> cycle session
+#define GROWATT_RX_TIMEOUT        300000  // RX stalled mid-session -> cycle session
+#define GROWATT_RECONNECT_DELAY   30000   // Base reconnect delay, doubled per silent session
 
 // Buffer sizes
 #define GROWATT_SERIAL_LEN        30      // Serial field width (NUL-padded)
@@ -215,6 +218,9 @@ private:
     uint32_t           _packetsSent;
     uint32_t           _packetsRecv;
     uint32_t           _reconnects;
+    uint32_t           _lastRecvTime;     // millis() of last valid RX (0 = none this session)
+    uint32_t           _connectTime;      // millis() when current session connected
+    uint8_t            _silentSessions;   // consecutive sessions with zero RX
 
     // --- Buffers ---
     uint8_t            _txBuf[GROWATT_MAX_PACKET];
