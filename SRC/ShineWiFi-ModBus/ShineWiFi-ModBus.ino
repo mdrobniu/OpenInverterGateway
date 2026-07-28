@@ -1315,8 +1315,43 @@ void loop() {
               }
             }
 
+#if GROWATT_MODBUS_VERSION == 124
+            // The cloud DATA record uses the legacy (v3.05-era) register
+            // slots — the layout server.growatt.com decodes for this record
+            // type. Translate the v1.24 register addresses into those slots;
+            // only status + the PV block (0-10) coincide between the maps.
+            static uint16_t t06Regs[GROWATT_MAX_INPUT_REGS];
+            memset(t06Regs, 0, sizeof(t06Regs));
+            for (uint16_t i = 0; i <= 10; i++) {
+              t06Regs[i] = inputRegsByAddr[i];  // status, Ppv, PV1/PV2 V/I/P
+            }
+            t06Regs[11] = inputRegsByAddr[35];  // Pac (32-bit hi)
+            t06Regs[12] = inputRegsByAddr[36];  // Pac (lo)
+            t06Regs[13] = inputRegsByAddr[37];  // Fac
+            t06Regs[14] = inputRegsByAddr[38];  // Vac1
+            t06Regs[15] = inputRegsByAddr[39];  // Iac1
+            t06Regs[16] = inputRegsByAddr[40];  // Pac1 (hi)
+            t06Regs[17] = inputRegsByAddr[41];  // Pac1 (lo)
+            t06Regs[18] = inputRegsByAddr[42];  // Vac2
+            t06Regs[19] = inputRegsByAddr[43];  // Iac2
+            t06Regs[20] = inputRegsByAddr[44];  // Pac2 (hi)
+            t06Regs[21] = inputRegsByAddr[45];  // Pac2 (lo)
+            t06Regs[22] = inputRegsByAddr[46];  // Vac3
+            t06Regs[23] = inputRegsByAddr[47];  // Iac3
+            t06Regs[24] = inputRegsByAddr[48];  // Pac3 (hi)
+            t06Regs[25] = inputRegsByAddr[49];  // Pac3 (lo)
+            t06Regs[26] = inputRegsByAddr[53];  // Eac today (hi)
+            t06Regs[27] = inputRegsByAddr[54];  // Eac today (lo)
+            t06Regs[28] = inputRegsByAddr[55];  // Eac total (hi)
+            t06Regs[29] = inputRegsByAddr[56];  // Eac total (lo)
+            t06Regs[30] = inputRegsByAddr[57];  // total work time (hi)
+            t06Regs[31] = inputRegsByAddr[58];  // total work time (lo)
+            growattCloud.loop(t06Regs, 45,
+                              holdingRegsByAddr, holdingRegsRead ? GROWATT_MAX_HOLDING_REGS : 0);
+#else
             growattCloud.loop(inputRegsByAddr, maxInputAddr + 2,
                               holdingRegsByAddr, holdingRegsRead ? GROWATT_MAX_HOLDING_REGS : 0);
+#endif
           }
 #endif
 
